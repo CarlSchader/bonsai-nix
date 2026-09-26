@@ -23,16 +23,23 @@ inputs.bonsai-nix.url = "github:carlschader/bonsai-nix";
 
   services.bonsai = {
     enable = true;
-    package = bonsai-nix.packages.${pkgs.system}.llamaServer;
+    # package defaults to the CUDA build when the DGX Spark preset is imported;
+    # otherwise set e.g. bonsai-nix.packages.${pkgs.system}.llamaServer.
     ui.enable = true;
   };
 }
 ```
 
-The DGX Spark preset reproduces the recommended setup for a GB10 machine:
-Vulkan backend, PTQ1_0 packing (5.95 GB), 131K context, memory cap. On the
-first start the service downloads the model into
-`/var/lib/bonsai/models/` and verifies its SHA-256.
+The DGX Spark preset is tuned for throughput with many concurrent coding
+agents on a GB10: the PrismML fork **built from source with CUDA for
+sm_121**, PTQ1_0 packing, 8 slots × 128K context, FP16 KV, server-side
+prompt cache, memory cap. On the first start the service downloads the
+model into `/var/lib/bonsai/models/` and verifies its SHA-256.
+
+Measured on a DGX Spark (build b10743): the shipped Vulkan prebuild decodes
+at ~5 tok/s; the CUDA build does ~35 tok/s single-stream, ~87 tok/s
+aggregate at 8 concurrent requests and ~150–180 tok/s at 16–32, with
+~1000 tok/s prompt processing.
 
 The API is OpenAI-compatible on `0.0.0.0:8080`; Open WebUI listens on
 `127.0.0.1:3080`.
@@ -59,10 +66,13 @@ packing trade-offs, known issues, update procedure, and troubleshooting.
 ## Flake outputs
 
 - `packages.<system>.llamaServer` (also `default`) — the pinned PrismML
-  llama.cpp build (CUDA 12.8 on x86_64-linux, Vulkan on aarch64-linux)
-- `packages.<system>.llamaServerCpu` — CPU-only build of the fork
+  llama.cpp prebuild (CUDA 12.8 on x86_64-linux, Vulkan on aarch64-linux)
+- `packages.<system>.llamaServerCuda` — the fork built from source with
+  CUDA (sm_121 / GB10 by default; ~20 min on the Spark). What the DGX
+  Spark preset uses.
+- `packages.<system>.llamaServerCpu` — CPU-only prebuild of the fork
 - `nixosModules.bonsai` (also `default`) — the `services.bonsai` module
-- `nixosModules.dgx-spark-bonsai2` — preset: PTQ1_0 + Vulkan on a DGX Spark
+- `nixosModules.dgx-spark-bonsai2` — preset: CUDA build, PTQ1_0, 8×128K slots on a DGX Spark
 - `checks.<system>.llamaServerVersion` — binary smoke test
 - `checks.<system>.bonsaiModuleEval` — module eval against a minimal
   nixosSystem

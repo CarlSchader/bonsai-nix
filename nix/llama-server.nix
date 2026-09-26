@@ -3,7 +3,10 @@
 # Stock llama.cpp cannot load the Bonsai 2 27B GGUF files: the PTQ1_0 /
 # PQ2_0 ternary quants and the hybrid-attention kernels only exist in the
 # PrismML-Eng/llama.cpp fork. b10743 (commit adfffbe41) is the newest
-# release that still ships aarch64 Linux binaries.
+# release that still ships aarch64 Linux binaries. There is no aarch64
+# Linux CUDA prebuild at all and the Vulkan one is ~7x slower than CUDA on
+# a GB10, so the DGX Spark preset uses the from-source build in
+# ./llama-server-cuda.nix instead.
 #
 # Exports: { packages.<backend>, checks.llamaServerVersion } per system.
 {
@@ -109,8 +112,13 @@ in {
     })
     // (lib.optionalAttrs (system == "aarch64-linux") {
       llamaServer = pkg;
+      llamaServerVulkan = pkg;
       llamaServerCpu = makeLlamaServer "cpu" artifact.aarch64-linux.cpu;
-    });
+    })
+    // {
+      # From-source CUDA build (sm_121 / GB10 by default); see llama-server-cuda.nix.
+      inherit ((import ./llama-server-cuda.nix { inherit nixpkgs system; })) llamaServerCuda;
+    };
 
   checks = {
     # Prove the prebuilt binary starts and reports its version. The Vulkan

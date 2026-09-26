@@ -1,5 +1,6 @@
 # Per-system packages, checks, and dev shells for bonsai-nix.
 {
+  self,
   nixpkgs,
   flake-utils,
   ...
@@ -18,7 +19,7 @@ flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system: let
     inherit system;
     modules = [
       ../modules/bonsai.nix
-      ../modules/dgx-spark-bonsai2.nix
+      (import ../modules/dgx-spark-bonsai2.nix {inherit self;})
       {
         nixpkgs.hostPlatform = system;
         nixpkgs.config.allowUnfree = true;

@@ -79,8 +79,11 @@ The model ships two GGUF variants:
 | **PTQ1_0** | 5.95 GB | Ada GPUs, L4, **Vulkan** | Smaller; slightly slower decode on Blackwell |
 | **PQ2_0** | 7.21 GB | CUDA / Blackwell / H100 / A100 | Faster decode & prefill; **broken on current Vulkan release** |
 
-Default preset for DGX Spark uses PTQ1_0 because PQ2_0 silently falls back
-to CPU on the Vulkan prebuild (upstream #238, fix pending in source).
+On the DGX Spark CUDA build both packings run on the GPU and produce the
+same outputs (same ternary weights, different packing). Measured there:
+PTQ1_0 decodes ~16% faster single-stream (35.6 vs 30.5 tok/s), PQ2_0
+prefills ~7% faster (~1020 vs ~945 tok/s); aggregate decode at 32 streams
+is equal. The preset keeps PTQ1_0.
 
 ## Sampling
 
@@ -108,14 +111,44 @@ services.bonsai.reasoningBudget = 8192;  # --reasoning-budget 8192
 
 - **Empty / truncated answers** → increase `max_tokens` to ≥ 16384 and/or
   use `reasoning_effort: "medium"`.
-- **Single-user prompt cache** → add to `extraArgs`:
-  ```nix
-  extraArgs = [ "-np" "1" "--cache-ram" "24576" ];
-  ```
+- **Prompt cache** is on by default (`promptCache.*` → `--cache-ram`,
+  `--ctx-checkpoints`, `--cache-idle-slots`). Clients must send
+  `cache_prompt: true` (llama-server's default) to reuse a prefix. Agent
+  loops that re-render *reasoning* into history defeat the prefix match
+  (Bonsai-demo #183) — strip it, or pass `--reasoning-preserve` via
+  `extraArgs` if your client relies on it.
+- **`-kvu` / `--cache-reuse` are not supported** on this hybrid-attention
+  model: every slot owns a full `contextLength` window and a request longer
+  than that fails instead of being shifted.
 - **Tool calling**: `--jinja` is enabled by default for OpenAI-style
   `tool_calls`.
 - **CUDA 13.3 crashes** on some systems — use the 12.8 build (the default).
 - **AVX-512 CPU crash with PQ2_0**: use PTQ1_0 or build from source.
+
+## Serving many agents (DGX Spark)
+
+Options that matter, with what the preset sets and what was measured on a
+GB10 with the CUDA build:
+
+| Option | Preset | Notes |
+|---|---|---|
+| `slots` (`-np`) | 8 | 1 stream 35.6 tok/s; 8 streams 12.7 each / 87 aggregate; 16–32 streams ~150–180 aggregate. |
+| `model.contextLength` (per slot) | 131072 | `-c` = slots × contextLength. FP16 KV ≈ 64 KiB/token → 8×128K ≈ 64 GiB (72 GiB RSS at load). |
+| `kvCacheType` | `f16` | `q8_0` halves KV memory at no measured speed cost; `q4_0` is not offered (3–60× slower prefill). |
+| `batchSize` / `ubatchSize` | 2048 / 512 | `-ub` 256–1024 measure identically. |
+| `promptCache.ramMiB` | 16384 | Host RAM for saved prompt states. |
+| `memoryMax` | 108G | systemd cap; keep weights + KV + cache under it. |
+
+Trade-offs, all without touching model quality:
+- More agents → `slots = 16` (adds ~64 GiB at 128K; or set
+  `contextLength = 65536` to keep memory flat). Per-stream speed at 16 is
+  ~9 tok/s.
+- Fewer, faster agents → `slots = 4` (~20 tok/s each).
+- Speculative decoding: no official drafter exists for Bonsai 2 27B, and
+  the community DSpark drafter's gain collapses past 2 slots and disables
+  the prompt cache — not used.
+
+Benchmark the running service with `CONCURRENCY=8 ./bench.sh`.
 
 ## Updating the llama.cpp binary
 
@@ -124,8 +157,12 @@ services.bonsai.reasoningBudget = 8192;  # --reasoning-budget 8192
    ```sh
    curl -LO <url> && sha256sum llama-*.tar.gz
    ```
-3. Update `url` and `sha256` in `nix/llama-server.nix`.
-4. `nix build .#llamaServer` to verify.
+3. Update `url` and `sha256` in `nix/llama-server.nix` (prebuilds) and
+   `rev`/`hash`/`buildNumber` in `nix/llama-server-cuda.nix` (source build;
+   `nix-prefetch-url --unpack https://github.com/PrismML-Eng/llama.cpp/archive/<rev>.tar.gz`).
+   If `tools/ui/package-lock.json` changed relative to nixpkgs' llama-cpp,
+   the `npmDepsHash` must be overridden too.
+4. `nix build .#llamaServer .#llamaServerCuda` to verify.
 
 ## Updating the model
 

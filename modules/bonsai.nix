@@ -33,7 +33,7 @@
 
   # fileName -> sha256 (null when unknown and no explicit override given)
   shaFor = f:
-    if knownFiles ? f then knownFiles.${f}
+    if knownFiles ? ${f} then knownFiles.${f}
     else cfg.model.sha256;
 
   # Files to fetch on first start. localPath bypasses the download entirely.
@@ -91,8 +91,19 @@
       (toString cfg.model.numGpuLayers)
       "-fa"
       (if cfg.flashAttention then "on" else "off")
+      # llama-server's -c is the *total* context, split evenly across slots.
       "-c"
-      (toString cfg.model.contextLength)
+      (toString (cfg.model.contextLength * cfg.slots))
+      "-np"
+      (toString cfg.slots)
+      "-b"
+      (toString cfg.batchSize)
+      "-ub"
+      (toString cfg.ubatchSize)
+      "-ctk"
+      cfg.kvCacheType
+      "-ctv"
+      cfg.kvCacheType
       "--temp"
       cfg.sampling.temperature
       "--top-p"
@@ -113,6 +124,15 @@
       "--reasoning-budget"
       (toString cfg.reasoningBudget)
     ]
+    ++ lib.optionals cfg.promptCache.enable (
+      [
+        "--cache-ram"
+        (toString cfg.promptCache.ramMiB)
+        "--ctx-checkpoints"
+        (toString cfg.promptCache.checkpoints)
+      ]
+      ++ lib.optionals cfg.promptCache.idleSlots [ "--cache-idle-slots" ]
+    )
     ++ cfg.extraArgs;
 
 in {
@@ -208,7 +228,13 @@ in {
       contextLength = lib.mkOption {
         type = lib.types.ints.between 2048 262144;
         default = 32768;
-        description = "Context window (`-c`). The model supports up to 262144 tokens.";
+        description = ''
+          Context window **per slot**. llama-server is passed
+          `-c contextLength * slots`, which it splits evenly over the
+          slots. The model supports up to 262144 tokens per sequence.
+          FP16 KV costs ~64 KiB/token on this hybrid-attention model, so
+          memory ≈ slots × contextLength × 64 KiB (8 × 131072 ≈ 64 GiB).
+        '';
       };
 
       numGpuLayers = lib.mkOption {
@@ -241,6 +267,67 @@ in {
       };
     };
 
+    slots = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1;
+      example = 8;
+      description = ''
+        Number of parallel sequences / concurrent requests (`-np`).
+        Requests beyond this queue. Aggregate decode throughput on a GB10
+        keeps rising to ~16 slots; per-stream speed falls as slots fill.
+        Note: the hybrid-attention model does not support a unified KV
+        cache (`-kvu`), so every slot gets its own full context.
+      '';
+    };
+
+    batchSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2048;
+      description = "Logical batch size (`-b`).";
+    };
+
+    ubatchSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 512;
+      description = "Physical batch size (`-ub`). 256–1024 measure identically on a GB10.";
+    };
+
+    kvCacheType = lib.mkOption {
+      type = lib.types.enum [ "f16" "bf16" "q8_0" ];
+      default = "f16";
+      description = ''
+        KV cache element type (`-ctk`/`-ctv`). `q8_0` halves KV memory at
+        no measurable speed cost; `q4_0` is deliberately not offered — it
+        slows prompt processing 3–60× on this model (Bonsai-demo #145).
+      '';
+    };
+
+    promptCache = {
+      enable = lib.mkEnableOption "the server-side prompt cache (prefix reuse across agent turns)" // { default = true; };
+
+      ramMiB = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 8192;
+        description = "`--cache-ram`: host-RAM budget (MiB) for saved prompt states, separate from the KV allocation.";
+      };
+
+      checkpoints = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 32;
+        description = ''
+          `--ctx-checkpoints`: recurrent-state snapshots kept per slot so a
+          prefix of a hybrid-attention sequence can be restored. Required
+          for prefix reuse on this model; 0 disables.
+        '';
+      };
+
+      idleSlots = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "`--cache-idle-slots`: save idle-slot state into the prompt cache so a returning conversation can land on any slot.";
+      };
+    };
+
     flashAttention = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -262,8 +349,8 @@ in {
     extraArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      example = [ "-np" "1" "--cache-ram" "24576" ];
-      description = "Extra arguments appended to `llama-server` (e.g. the single-user prompt-cache workaround `-np 1 --cache-ram 24576`).";
+      example = [ "--reasoning-preserve" ];
+      description = "Extra arguments appended to `llama-server`.";
     };
 
     memoryMax = lib.mkOption {
@@ -364,11 +451,11 @@ in {
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.model.localPath != null || knownFiles ? cfg.model.fileName || cfg.model.sha256 != null;
+        assertion = cfg.model.localPath != null || knownFiles ? ${cfg.model.fileName} || cfg.model.sha256 != null;
         message = "services.bonsai.model.fileName '${cfg.model.fileName}' is not in the known-files table; set model.sha256 or use a known file.";
       }
       {
-        assertion = cfg.model.localPath != null || cfg.model.mmproj == null || knownFiles ? cfg.model.mmproj;
+        assertion = cfg.model.localPath != null || cfg.model.mmproj == null || knownFiles ? ${cfg.model.mmproj};
         message = "services.bonsai.model.mmproj '${cfg.model.mmproj}' is not in the known-files table.";
       }
       {
