@@ -32,6 +32,22 @@
   cfg = config.services.bonsai;
 in {
   config = lib.mkIf cfg.enable {
+    # nixpkgs-unstable has no aarch64 binary cache entry for open-webui, so
+    # it (and its torch stack) builds from source; torchaudio then fails one
+    # numerical-tolerance test on this CPU (test_batch_melspectrogram,
+    # 1 failed / 2232 passed). Skip its tests so the UI is installable.
+    nixpkgs.overlays = lib.mkIf cfg.ui.enable [
+      (final: prev: {
+        pythonPackagesExtensions =
+          prev.pythonPackagesExtensions
+          ++ [
+            (pyFinal: pyPrev: {
+              torchaudio = pyPrev.torchaudio.overridePythonAttrs (_: { doCheck = false; });
+            })
+          ];
+      })
+    ];
+
     services.bonsai = {
       package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.llamaServerCuda;
 

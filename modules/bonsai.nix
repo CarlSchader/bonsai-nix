@@ -54,8 +54,8 @@
     mkdir -p "$outdir"
     cd "$outdir"
     for pair in "$@"; do
-      file=$${pair%%|*}; rest=$${pair#*|}
-      url=$${rest%%|*}; sha=$${rest#*|}
+      file=''${pair%%|*}; rest=''${pair#*|}
+      url=''${rest%%|*}; sha=''${rest#*|}
       if [ -s "$file" ]; then
         echo "bonsai-fetch: $file already present, skipping download"
         continue
